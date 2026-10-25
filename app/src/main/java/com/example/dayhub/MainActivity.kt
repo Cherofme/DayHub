@@ -1,16 +1,28 @@
 package com.example.dayhub
 
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.workDataOf
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
+import android.view.Gravity
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.CalendarContract
 import android.text.InputType
 import android.view.View
+import android.view.WindowInsets
+import android.os.Build
 import android.widget.*
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -23,34 +35,144 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 class MainActivity : Activity() {
     private lateinit var root: LinearLayout
-    private val ink = Color.rgb(24, 39, 62)
-    private val blue = Color.rgb(29, 95, 175)
+    private val ink = Color.rgb(236, 242, 252)
+    private val muted = Color.rgb(158, 178, 205)
+    private val surface = Color.rgb(24, 35, 54)
+    private val accent = Color.rgb(117, 181, 255)
+    private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
+    private fun bg(color: Int, radius: Int = 18): GradientDrawable =
+        GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showHome()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            "dayhub_morning", ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<DailyBriefWorker>(1, TimeUnit.HOURS).build()
+        )
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 103)
+        }
     }
     private fun text(value: String, size: Float = 16f): TextView = TextView(this).apply {
-        text = value; textSize = size; setTextColor(ink); setPadding(4, 9, 4, 9)
+        text = value; textSize = size; setTextColor(if (size <= 14f) muted else ink)
+        setPadding(dp(4), dp(8), dp(4), dp(8))
+        setLineSpacing(dp(3).toFloat(), 1f)
     }
     private fun page(title: String) {
-        val scroll = ScrollView(this)
-        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 30, 24, 32); setBackgroundColor(Color.rgb(246, 249, 253)) }
-        scroll.addView(root); setContentView(scroll)
-        root.addView(text(title, 27f))
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Color.rgb(12, 19, 32))
+        }
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(26), dp(20), dp(36))
+        }
+        scroll.addView(root)
+        if (Build.VERSION.SDK_INT >= 35) {
+            scroll.setOnApplyWindowInsetsListener { view, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                insets
+            }
+        }
+        window.statusBarColor = Color.rgb(12, 19, 32)
+        window.navigationBarColor = Color.rgb(12, 19, 32)
+        window.decorView.systemUiVisibility = 0
+        setContentView(scroll)
+        root.addView(text(title, 27f).apply {
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), dp(12), dp(2), dp(18))
+        })
     }
     private fun button(label: String, action: () -> Unit) {
-        root.addView(Button(this).apply { text = label; isAllCaps = false; setOnClickListener { action() } })
+        val view = TextView(this).apply {
+            text = label
+            textSize = 16f
+            setTextColor(ink)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(18), dp(18), dp(18))
+            background = bg(surface)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
+        }
+        root.addView(view, LinearLayout.LayoutParams(-1, -2).apply {
+            bottomMargin = dp(11)
+        })
     }
+    private fun panel(kicker: String, headline: String, description: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(15), dp(18), dp(15))
+            background = bg(Color.rgb(30, 49, 75), 22)
+        }
+        card.addView(text(kicker.uppercase(Locale.getDefault()), 12f).apply { setTextColor(accent) })
+        card.addView(text(headline, 23f).apply { setTypeface(null, Typeface.BOLD) })
+        card.addView(text(description, 14f))
+        root.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
+    }
+
+    private fun briefSettings() {
+        page("Настройки автономности")
+
+        val prefs = getSharedPreferences("dayhub_brief", MODE_PRIVATE)
+
+        val toggle = android.widget.Switch(this).apply {
+            text = "Утренняя сводка (08:00–12:00)"
+            textSize = 16f
+            setTextColor(ink)
+            isChecked = prefs.getBoolean("enabled", true)
+
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("enabled", checked).apply()
+            }
+        }
+
+        root.addView(toggle)
+
+        root.addView(
+            text(
+                "Сводка включает погоду и ближайшие события. " +
+                "Android может задерживать фоновые задачи.",
+                14f
+            )
+        )
+
+        button("← Назад") { showHome() }
+    }
+
     private fun showHome() {
-        page("DayHub · Мой день")
-        root.addView(text("Персональный центр · прототип 0.1", 13f))
-        button("✉ Почта · подключение впереди") { placeholder("Gmail", "Для Gmail нужен OAuth и отдельная интеграция. Письма не читаются и не отправляются.") }
-        button("♫ YouTube Music") { music() }
-        button("☁ Погода по геолокации") { weather() }
-        button("▦ Календарь") { calendar() }
-        button("➤ Telegram · подключение впереди") { placeholder("Telegram", "Полная история чатов потребует TDLib и авторизации аккаунта. Пока сообщения не читаются.") }
-        button("▤ Новости · 4 категории") { news() }
-        root.addView(text("Без рекламных SDK и без отправки личных данных на собственный сервер.", 12f))
+        page("DayHub")
+        panel("Персональный ассистент · 0.3", "Твой день, без лишнего шума",
+            "Погода, календарь, новости и музыка. Автономная сводка готовится в фоне.")
+        button("☀  Сформировать сводку сейчас") { runBriefNow() }
+        button("⚙  Настройки автономности") { briefSettings() }
+        root.addView(text("ТВОИ РАЗДЕЛЫ", 12f).apply {
+            setTextColor(accent)
+            setPadding(dp(4), dp(14), dp(4), dp(12))
+        })
+        button("☁  Погода · прогноз по часам") { weather() }
+        button("▦  Календарь · ближайшие события") { calendar() }
+        button("▤  Новости · Мир / Украина / Болгария / ИИ") { news() }
+        button("♫  YouTube Music") { music() }
+        button("✉  Gmail · скоро") { placeholder("Gmail", "OAuth ещё не подключён. Письма не читаются и не отправляются.") }
+        button("➤  Telegram · скоро") { placeholder("Telegram", "Полная интеграция потребует TDLib и авторизации. Пока чаты не читаются.") }
+        root.addView(text("Данные хранятся на устройстве. Отправка писем не реализована.", 12f))
+    }
+    private fun runBriefNow() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 103)
+            Toast.makeText(this, "Разреши уведомления и повтори", Toast.LENGTH_LONG).show()
+            return
+        }
+        val request = OneTimeWorkRequestBuilder<DailyBriefWorker>()
+            .setInputData(workDataOf("manual" to true))
+            .build()
+        WorkManager.getInstance(this).enqueue(request)
+        Toast.makeText(this, "Сводка поставлена в очередь. Проверь уведомления.", Toast.LENGTH_LONG).show()
     }
     private fun placeholder(title: String, message: String) { page(title); root.addView(text(message)); button("← Назад") { showHome() } }
     private fun music() {
@@ -142,12 +264,30 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val xml = fetch(url)
-                val factory = DocumentBuilderFactory.newInstance().apply {
-                    setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-                    setFeature("http://xml.org/sax/features/external-general-entities", false)
-                    setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+                if (Regex("<!\\s*(DOCTYPE|ENTITY)", RegexOption.IGNORE_CASE).containsMatchIn(xml)) {
+                    throw SecurityException("RSS содержит запрещённые XML DTD/ENTITY")
                 }
-                val doc = factory.newDocumentBuilder().parse(xml.byteInputStream())
+                val factory = DocumentBuilderFactory.newInstance().apply {
+                    try {
+                        setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+                    } catch (_: javax.xml.parsers.ParserConfigurationException) {
+                        // Unsupported XML feature on this Android parser.
+                    }
+                    try {
+                        setFeature("http://xml.org/sax/features/external-general-entities", false)
+                    } catch (_: javax.xml.parsers.ParserConfigurationException) {
+                        // Unsupported XML feature on this Android parser.
+                    }
+                    try {
+                        setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+                    } catch (_: javax.xml.parsers.ParserConfigurationException) {
+                        // Unsupported XML feature on this Android parser.
+                    }
+                }
+                factory.isExpandEntityReferences = false
+                val builder = factory.newDocumentBuilder()
+                builder.setEntityResolver { _, _ -> org.xml.sax.InputSource(java.io.StringReader("")) }
+                val doc = builder.parse(xml.byteInputStream())
                 val items = doc.getElementsByTagName("item")
                 val cutoff = System.currentTimeMillis() - 24L * 3600_000
                 val stories = mutableListOf<Pair<String, String>>()
