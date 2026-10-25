@@ -4,7 +4,6 @@ android {
     compileSdk = 35
     defaultConfig { applicationId = "com.example.dayhub"; minSdk = 26; targetSdk = 35; versionCode = 7; versionName = "0.3.3" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -13,3 +12,5 @@ dependencies {
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }
+
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
