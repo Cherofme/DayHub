@@ -21,14 +21,17 @@ import java.util.Locale
 
 class DailyBriefWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
     override fun doWork(): Result {
-        val prefs = applicationContext.getSharedPreferences("brief", Context.MODE_PRIVATE)
+        val prefs = applicationContext.getSharedPreferences(BriefPreferences.FILE, Context.MODE_PRIVATE)
+        val legacyPrefs = applicationContext.getSharedPreferences("brief", Context.MODE_PRIVATE)
         val manual = inputData.getBoolean("manual", false)
-        if (!manual && !prefs.getBoolean("enabled", true)) return Result.success()
+        if (!manual && !prefs.getBoolean(BriefPreferences.ENABLED, true)) return Result.success()
         val cal = Calendar.getInstance()
         val hour = cal.get(Calendar.HOUR_OF_DAY)
         if (!manual && (hour < 8 || hour >= 12)) return Result.success()
         val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        if (!manual && prefs.getString("last_sent", "") == today) return Result.success()
+        val lastSent = prefs.getString(BriefPreferences.LAST_SENT, null)
+            ?: legacyPrefs.getString(BriefPreferences.LAST_SENT, "")
+        if (!manual && lastSent == today) return Result.success()
         if (Build.VERSION.SDK_INT >= 33 && applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return Result.success()
         val details = mutableListOf<String>()
         try {
@@ -64,6 +67,26 @@ class DailyBriefWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, par
                 }
             }
         } catch (_: Exception) { }
+        try {
+            val cutoff = System.currentTimeMillis() - 24L * 3600_000
+            val news = RssFeedRepository.fetchBrief(cutoff, timeoutMillis = 4000)
+            val updatedAt = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+            val sourceCount = "${news.successfulFeeds}/${RssFeedRepository.feeds.size} лент"
+            when {
+                news.headlines.isNotEmpty() -> {
+                    val headlines = news.headlines.joinToString("\n") {
+                        "• ${it.category} · ${it.source}: ${it.title}"
+                    }
+                    details.add("Новости · RSS, обновлено в $updatedAt ($sourceCount):\n$headlines")
+                }
+                news.successfulFeeds > 0 -> {
+                    details.add("Новости · RSS, обновлено в $updatedAt ($sourceCount): заголовков за 24 часа нет")
+                }
+                details.isNotEmpty() -> details.add("Новости · RSS-ленты временно недоступны")
+            }
+        } catch (_: Exception) {
+            if (details.isNotEmpty()) details.add("Новости · не удалось обновить RSS")
+        }
         if (details.isEmpty()) details.add("Открой DayHub, чтобы проверить погоду и события")
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "dayhub_brief"
@@ -77,7 +100,7 @@ class DailyBriefWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, par
             .setAutoCancel(true)
             .build()
         manager.notify(202, notification)
-        if (!manual) prefs.edit().putString("last_sent", today).apply()
+        if (!manual) prefs.edit().putString(BriefPreferences.LAST_SENT, today).apply()
         return Result.success()
     }
 }

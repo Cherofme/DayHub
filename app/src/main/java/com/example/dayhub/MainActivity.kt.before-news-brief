@@ -1,0 +1,317 @@
+package com.example.dayhub
+
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.workDataOf
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
+import android.view.Gravity
+import android.location.LocationManager
+import android.net.Uri
+import android.os.Bundle
+import android.provider.CalendarContract
+import android.text.InputType
+import android.view.View
+import android.view.WindowInsets
+import android.os.Build
+import android.widget.*
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+class MainActivity : Activity() {
+    private lateinit var root: LinearLayout
+    private val ink = Color.rgb(236, 242, 252)
+    private val muted = Color.rgb(158, 178, 205)
+    private val surface = Color.rgb(24, 35, 54)
+    private val accent = Color.rgb(117, 181, 255)
+    private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
+    private fun bg(color: Int, radius: Int = 18): GradientDrawable =
+        GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        showHome()
+        val briefPrefs = getSharedPreferences(BriefPreferences.FILE, MODE_PRIVATE)
+        setMorningBriefEnabled(briefPrefs.getBoolean(BriefPreferences.ENABLED, true))
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 103)
+        }
+    }
+    private fun text(value: String, size: Float = 16f): TextView = TextView(this).apply {
+        text = value; textSize = size; setTextColor(if (size <= 14f) muted else ink)
+        setPadding(dp(4), dp(8), dp(4), dp(8))
+        setLineSpacing(dp(3).toFloat(), 1f)
+    }
+    private fun page(title: String) {
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Color.rgb(12, 19, 32))
+        }
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(26), dp(20), dp(36))
+        }
+        scroll.addView(root)
+        if (Build.VERSION.SDK_INT >= 35) {
+            scroll.setOnApplyWindowInsetsListener { view, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                insets
+            }
+        }
+        window.statusBarColor = Color.rgb(12, 19, 32)
+        window.navigationBarColor = Color.rgb(12, 19, 32)
+        window.decorView.systemUiVisibility = 0
+        setContentView(scroll)
+        root.addView(text(title, 27f).apply {
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(2), dp(12), dp(2), dp(18))
+        })
+    }
+    private fun button(label: String, action: () -> Unit) {
+        val view = TextView(this).apply {
+            text = label
+            textSize = 16f
+            setTextColor(ink)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(18), dp(18), dp(18))
+            background = bg(surface)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
+        }
+        root.addView(view, LinearLayout.LayoutParams(-1, -2).apply {
+            bottomMargin = dp(11)
+        })
+    }
+    private fun panel(kicker: String, headline: String, description: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(15), dp(18), dp(15))
+            background = bg(Color.rgb(30, 49, 75), 22)
+        }
+        card.addView(text(kicker.uppercase(Locale.getDefault()), 12f).apply { setTextColor(accent) })
+        card.addView(text(headline, 23f).apply { setTypeface(null, Typeface.BOLD) })
+        card.addView(text(description, 14f))
+        root.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
+    }
+
+    private fun briefSettings() {
+        page("Настройки автономности")
+
+        val prefs = getSharedPreferences(BriefPreferences.FILE, MODE_PRIVATE)
+
+        val toggle = android.widget.Switch(this).apply {
+            text = "Утренняя сводка (08:00–12:00)"
+            textSize = 16f
+            setTextColor(ink)
+            isChecked = prefs.getBoolean(BriefPreferences.ENABLED, true)
+
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean(BriefPreferences.ENABLED, checked).apply()
+                setMorningBriefEnabled(checked)
+            }
+        }
+
+        root.addView(toggle)
+
+        root.addView(
+            text(
+                "Сводка включает погоду и ближайшие события. " +
+                "Android может задерживать фоновые задачи.",
+                14f
+            )
+        )
+
+        button("← Назад") { showHome() }
+    }
+
+    private fun setMorningBriefEnabled(enabled: Boolean) {
+        val workManager = WorkManager.getInstance(this)
+        if (!enabled) {
+            workManager.cancelUniqueWork("dayhub_morning")
+            return
+        }
+        workManager.enqueueUniquePeriodicWork(
+            "dayhub_morning",
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<DailyBriefWorker>(1, TimeUnit.HOURS).build()
+        )
+    }
+
+    private fun showHome() {
+        page("DayHub")
+        panel("Персональный ассистент · 0.3", "Твой день, без лишнего шума",
+            "Погода, календарь, новости и музыка. Автономная сводка готовится в фоне.")
+        button("☀  Сформировать сводку сейчас") { runBriefNow() }
+        button("⚙  Настройки автономности") { briefSettings() }
+        root.addView(text("ТВОИ РАЗДЕЛЫ", 12f).apply {
+            setTextColor(accent)
+            setPadding(dp(4), dp(14), dp(4), dp(12))
+        })
+        button("☁  Погода · прогноз по часам") { weather() }
+        button("▦  Календарь · ближайшие события") { calendar() }
+        button("▤  Новости · Мир / Украина / Болгария / ИИ") { news() }
+        button("♫  YouTube Music") { music() }
+        button("✉  Gmail · скоро") { placeholder("Gmail", "OAuth ещё не подключён. Письма не читаются и не отправляются.") }
+        button("➤  Telegram · скоро") { placeholder("Telegram", "Полная интеграция потребует TDLib и авторизации. Пока чаты не читаются.") }
+        root.addView(text("Данные хранятся на устройстве. Отправка писем не реализована.", 12f))
+    }
+    private fun runBriefNow() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 103)
+            Toast.makeText(this, "Разреши уведомления и повтори", Toast.LENGTH_LONG).show()
+            return
+        }
+        val request = OneTimeWorkRequestBuilder<DailyBriefWorker>()
+            .setInputData(workDataOf("manual" to true))
+            .build()
+        WorkManager.getInstance(this).enqueue(request)
+        Toast.makeText(this, "Сводка поставлена в очередь. Проверь уведомления.", Toast.LENGTH_LONG).show()
+    }
+    private fun placeholder(title: String, message: String) { page(title); root.addView(text(message)); button("← Назад") { showHome() } }
+    private fun music() {
+        page("YouTube Music")
+        root.addView(text("Вставь ссылку на свой плейлист. Она сохранится только на этом телефоне."))
+        val edit = EditText(this).apply { setSingleLine(); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI; setText(getPreferences(MODE_PRIVATE).getString("playlist", "https://music.youtube.com/")) }
+        root.addView(edit)
+        button("Сохранить и открыть") {
+            val url = edit.text.toString().trim()
+            if (!url.startsWith("https://music.youtube.com/") && !url.startsWith("https://www.youtube.com/")) {
+                Toast.makeText(this, "Нужна ссылка YouTube Music / YouTube", Toast.LENGTH_LONG).show()
+            } else {
+                getPreferences(MODE_PRIVATE).edit().putString("playlist", url).apply()
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
+        }
+        root.addView(text("Автовоспроизведение зависит от приложения YouTube Music.", 13f))
+        button("← Назад") { showHome() }
+    }
+    private fun weather() {
+        page("Погода")
+        if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            root.addView(text("Разреши доступ к примерному местоположению. Точные координаты не нужны."))
+            button("Разрешить геолокацию") { requestPermissions(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION), 101) }
+            button("← Назад") { showHome() }
+            return
+        }
+        val output = text("Получаю координаты и прогноз…")
+        root.addView(output)
+        button("← Назад") { showHome() }
+        val manager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val location = try { manager.getProviders(true).mapNotNull { manager.getLastKnownLocation(it) }.maxByOrNull { it.time } } catch (_: SecurityException) { null }
+        if (location == null) { output.text = "Местоположение ещё не определено. Включи геолокацию, открой карты и повтори попытку."; return }
+        val lat = location.latitude; val lon = location.longitude
+        Thread {
+            try {
+                val json = JSONObject(fetch("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,precipitation_probability,precipitation&forecast_days=2&timezone=auto"))
+                val current = json.getJSONObject("current"); val hourly = json.getJSONObject("hourly")
+                val times = hourly.getJSONArray("time"); val temps = hourly.getJSONArray("temperature_2m"); val rain = hourly.getJSONArray("precipitation_probability")
+                val now = SimpleDateFormat("yyyy-MM-dd'T'HH", Locale.US).format(Date())
+                val lines = mutableListOf("Сейчас: ${current.optDouble("temperature_2m")} °C · ветер ${current.optDouble("wind_speed_10m")} км/ч", "", "Ближайшие часы:")
+                var count = 0
+                for (i in 0 until times.length()) {
+                    if (times.getString(i).take(13) >= now && count < 12) {
+                        lines.add("${times.getString(i).takeLast(5)} · ${temps.optDouble(i)} °C · дождь ${rain.optInt(i)}%")
+                        count++
+                    }
+                }
+                runOnUiThread { output.text = lines.joinToString("\n") }
+            } catch (e: Exception) { runOnUiThread { output.text = "Ошибка прогноза: ${e.message}" } }
+        }.start()
+    }
+    private fun calendar() {
+        page("Календарь · ближайшие 48 часов")
+        if (checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            root.addView(text("Для чтения событий нужно разрешение календаря."))
+            button("Разрешить календарь") { requestPermissions(arrayOf(Manifest.permission.READ_CALENDAR), 102) }
+            button("← Назад") { showHome() }; return
+        }
+        val start = System.currentTimeMillis(); val end = start + 48L * 3600_000
+        val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also { android.content.ContentUris.appendId(it, start); android.content.ContentUris.appendId(it, end) }.build()
+        val result = mutableListOf<String>()
+        try {
+            contentResolver.query(uri, arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END), null, null, CalendarContract.Instances.BEGIN + " ASC")?.use { cursor ->
+                val fmt = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault())
+                while (cursor.moveToNext() && result.size < 30) {
+                    result.add("${fmt.format(Date(cursor.getLong(1)))} — ${cursor.getString(0) ?: "Без названия"}")
+                }
+            }
+        } catch (e: Exception) { result.add("Ошибка календаря: ${e.message}") }
+        root.addView(text(if (result.isEmpty()) "Событий нет или календарь не синхронизирован." else result.joinToString("\n")))
+        button("← Назад") { showHome() }
+    }
+    private fun news() {
+        page("Новости · RSS")
+        root.addView(text("Ленты показывают публикации источников, не ИИ-проверку важности. Для фильтра за 24 часа используется дата RSS." , 13f))
+        val feeds = listOf(
+            "Мир" to "https://feeds.bbci.co.uk/news/world/rss.xml",
+            "Украина" to "https://www.pravda.com.ua/rss/",
+            "Болгария" to "https://www.bta.bg/en/rss/free",
+            "ИИ" to "https://techcrunch.com/category/artificial-intelligence/feed/"
+        )
+        for ((category, url) in feeds) button(category) { loadFeed(category, url) }
+        button("← Назад") { showHome() }
+    }
+    private fun loadFeed(category: String, url: String) {
+        page("Новости · $category")
+        val output = text("Загружаю…"); root.addView(output); button("← Категории") { news() }
+        Thread {
+            try {
+                val xml = fetch(url)
+                val cutoff = System.currentTimeMillis() - 24L * 3600_000
+                val stories = SafeRssParser.recentStories(xml, cutoff)
+                runOnUiThread {
+                    output.text = if (stories.isEmpty()) "За последние 24 часа публикаций с распознанной датой нет." else "Найдено: ${stories.size}"
+                    for (story in stories) if (story.link.startsWith("https://")) {
+                        button("• ${story.title}") {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(story.link)))
+                        }
+                    }
+                }
+            } catch (e: Exception) { runOnUiThread { output.text = "Лента недоступна: ${e.message}" } }
+        }.start()
+    }
+    private fun fetch(url: String): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 12000; conn.readTimeout = 12000
+        conn.setRequestProperty("User-Agent", "DayHub/0.1 Android")
+        return try {
+            conn.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                var totalBytes = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    totalBytes += count
+                    if (totalBytes > 1_048_576) {
+                        throw java.io.IOException("Ответ сервера превышает лимит 1 МБ")
+                    }
+                    output.write(buffer, 0, count)
+                }
+                String(output.toByteArray(), Charsets.UTF_8)
+            }
+        } finally { conn.disconnect() }
+    }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) { 101 -> weather(); 102 -> calendar() }
+    }
+}
